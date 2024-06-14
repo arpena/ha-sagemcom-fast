@@ -1,98 +1,62 @@
 """Support for device tracking of client router."""
+from __future__ import annotations
 
-from datetime import timedelta
-import logging
-from typing import Any, Dict, Optional
-
-import async_timeout
-from homeassistant.components.device_tracker import SOURCE_TYPE_ROUTER
+from homeassistant.components.device_tracker import SourceType
 from homeassistant.components.device_tracker.config_entry import ScannerEntity
-from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
-from homeassistant.helpers.update_coordinator import (
-    CoordinatorEntity,
-    DataUpdateCoordinator,
-    UpdateFailed,
-)
-from sagemcom_api.client import SagemcomClient
+from homeassistant.helpers.typing import StateType
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from sagemcom_api.models import Device
 
+from . import HomeAssistantSagemcomFastData
 from .const import DOMAIN
-
-_LOGGER = logging.getLogger(__name__)
-
-
-async def async_setup_entry(hass, config_entry, async_add_entities):
-    """Set up from config entry."""
-
-    coordinator = hass.data[DOMAIN][config_entry.entry_id]["coordinator"]
-
-    async_add_entities(
-        SagemcomScannerEntity(coordinator, idx, config_entry.entry_id)
-        for idx, device in coordinator.data.items()
-    )
+from .coordinator import SagemcomDataUpdateCoordinator
 
 
-class SagemcomDataUpdateCoordinator(DataUpdateCoordinator):
-    """Class to manage fetching Sagemcom data."""
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Set up device tracker from config entry."""
+    data: HomeAssistantSagemcomFastData = hass.data[DOMAIN][entry.entry_id]
+    tracked: dict[str, SagemcomScannerEntity] = {}
 
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        logger: logging.Logger,
-        *,
-        name: str,
-        client: SagemcomClient,
-        update_interval: Optional[timedelta] = None,
-    ):
-        """Initialize update coordinator."""
-        super().__init__(
-            hass,
-            logger,
-            name=name,
-            update_interval=update_interval,
-        )
-        self.data = {}
-        self.hosts: Dict[str, Device] = {}
-        self._client = client
+    @callback
+    def async_update_router() -> None:
+        """Update the values of the router."""
+        newly_discovered: list[SagemcomScannerEntity] = []
+        for idx, device in data.coordinator.data.items():
+            if idx not in tracked:
+                tracked[idx] = SagemcomScannerEntity(
+                    data.coordinator, idx, entry.entry_id
+                )
+                newly_discovered.append(tracked[idx])
+        async_add_entities(newly_discovered)
 
-    async def _async_update_data(self) -> Dict[str, Device]:
-        """Update hosts data."""
-        try:
-            async with async_timeout.timeout(10):
-                try:
-                    await self._client.login()
-                    hosts = await self._client.get_hosts()
-                    # get information about mesh devices
-                    data = await self._client.get_value_by_xpath("Device/Services/WSHDServices/WSHDDevicesMgt/Devices")
-                    meshdevs = {d['mac_address'].upper():d for d in data}   
-                finally:
-                    await self._client.logout()
-                """Mark all device as non-active."""
-                for idx, host in self.hosts.items():
-                    host.active = False
-                    self.hosts[idx] = host
-                for host in hosts:
-                    # add also hosts that are active in the mesh
-                    if host.active or (host.id in meshdevs and meshdevs[host.id]['active']):
-                        host.active = True
-                        self.hosts[host.id] = host
-                return self.hosts
-        except Exception as exception:
-            raise UpdateFailed(f"Error communicating with API: {exception}")
+    entry.async_on_unload(data.coordinator.async_add_listener(async_update_router))
+    async_update_router()
 
 
-class SagemcomScannerEntity(ScannerEntity, RestoreEntity, CoordinatorEntity):
+class SagemcomScannerEntity(
+    ScannerEntity, RestoreEntity, CoordinatorEntity[SagemcomDataUpdateCoordinator]
+):
     """Sagemcom router scanner entity."""
 
-    def __init__(self, coordinator, idx, parent):
+    def __init__(
+        self, coordinator: SagemcomDataUpdateCoordinator, idx: str, parent: str
+    ) -> None:
         """Initialize the device."""
         super().__init__(coordinator)
         self._idx = idx
         self._via_device = parent
 
     @property
-    def device(self):
+    def device(self) -> Device:
         """Return the device entity."""
         return self.coordinator.data[self._idx]
 
@@ -113,7 +77,7 @@ class SagemcomScannerEntity(ScannerEntity, RestoreEntity, CoordinatorEntity):
     @property
     def source_type(self) -> str:
         """Return the source type, eg gps or router, of the device."""
-        return SOURCE_TYPE_ROUTER
+        return SourceType.ROUTER
 
     @property
     def is_connected(self) -> bool:
@@ -121,20 +85,19 @@ class SagemcomScannerEntity(ScannerEntity, RestoreEntity, CoordinatorEntity):
         return self.device.active or False
 
     @property
-    def device_info(self):
+    def device_info(self) -> DeviceInfo:
         """Return the device info."""
-        return {
-            "name": self.name,
-            "identifiers": {(DOMAIN, self.unique_id)},
-            "via_device": (DOMAIN, self._via_device),
-        }
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.unique_id)},
+            connections={(CONNECTION_NETWORK_MAC, self.device.phys_address)},
+            name=self.name,
+            via_device=(DOMAIN, self._via_device),
+        )
 
     @property
-    def device_state_attributes(self) -> Dict[str, Any]:
+    def extra_state_attributes(self) -> dict[str, StateType]:
         """Return the state attributes of the device."""
-        attr = {"interface_type": self.device.interface_type}
-
-        return attr
+        return {"interface_type": self.device.interface_type}
 
     @property
     def ip_address(self) -> str:
