@@ -40,7 +40,11 @@ class SagemcomDataUpdateCoordinator(DataUpdateCoordinator):
             async with async_timeout.timeout(10):
                 try:
                     await self.client.login()
-                    hosts = await self.client.get_hosts(only_active=True)
+                    # get all hosts 
+                    hosts = await self.client.get_hosts()
+                    # get information about mesh devices
+                    data = await self._client.get_value_by_xpath("Device/Services/WSHDServices/WSHDDevicesMgt/Devices")
+                    meshdevs = {d['mac_address'].upper():d for d in data}   
                 finally:
                     await self.client.logout()
 
@@ -49,7 +53,10 @@ class SagemcomDataUpdateCoordinator(DataUpdateCoordinator):
                     host.active = False
                     self.hosts[idx] = host
                 for host in hosts:
-                    self.hosts[host.id] = host
+                    # add also hosts that are active in the device or in the mesh
+                    if host.active or (host.id in meshdevs and meshdevs[host.id]['active']):
+                        host.active = True
+                        self.hosts[host.id] = host
 
                 return self.hosts
         except Exception as exception:
