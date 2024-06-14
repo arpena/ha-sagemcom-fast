@@ -43,7 +43,7 @@ class SagemcomDataUpdateCoordinator(DataUpdateCoordinator):
                     # get all hosts 
                     hosts = await self.client.get_hosts()
                     # get information about mesh devices
-                    data = await self._client.get_value_by_xpath("Device/Services/WSHDServices/WSHDDevicesMgt/Devices")
+                    data = await self.client.get_value_by_xpath("Device/Services/WSHDServices/WSHDDevicesMgt/Devices")
                     meshdevs = {d['mac_address'].upper():d for d in data}   
                 finally:
                     await self.client.logout()
